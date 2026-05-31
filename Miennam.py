@@ -7,11 +7,13 @@ import re
 from PIL import Image
 import io
 from collections import Counter
+import gc # Thư viện dọn rác bộ nhớ
 
-# --- 1. CORE ENGINES (82-BIT & OCR THÔNG MINH) ---
-@st.cache_resource
+# --- 1. CORE ENGINES (TỐI ƯU HÓA BỘ NHỚ) ---
+@st.cache_resource(max_entries=1)
 def load_ocr():
-    return easyocr.Reader(['en'])
+    # Tắt GPU nếu chạy trên môi trường share để tránh tràn vRAM gây văng App
+    return easyocr.Reader(['en'], gpu=False)
 
 def get_8bit(n):
     val = int(n); d, u = val // 10, val % 10
@@ -33,22 +35,25 @@ def calculate_tier(losses, threshold_pct):
     return losses_sorted[max(0, idx)]
 
 def update_matrix_state(db, results_18, mapping):
-    if not db: # Tự khởi tạo ma trận nếu chưa có dữ liệu
+    if not db:
         for i in range(82*82): db[str(i)] = {"streak_win": 0, "streak_loss": 0, "score": 1000.0, "hit_history": []}
+    
     for wire_id, w_data in db.items():
         num = mapping.get(str(wire_id))
+        # Giới hạn lịch sử 20 kỳ để file JSON nhẹ
+        hist = w_data.get("hit_history", [])[-19:]
+        
         if num in results_18:
             w_data["streak_win"] = w_data.get("streak_win", 0) + 1
             w_data["streak_loss"] = 0
-            w_data["score"] = w_data.get("score", 1000.0) - 1.8
-            hist = w_data.get("hit_history", [])
-            hist.append(1); w_data["hit_history"] = hist[-20:]
+            w_data["score"] = round(w_data.get("score", 1000.0) - 1.8, 2)
+            hist.append(1)
         else:
             w_data["streak_loss"] = w_data.get("streak_loss", 0) + 1
             w_data["streak_win"] = 0
-            w_data["score"] = w_data.get("score", 1000.0) + 1.0
-            hist = w_data.get("hit_history", [])
-            hist.append(0); w_data["hit_history"] = hist[-20:]
+            w_data["score"] = round(w_data.get("score", 1000.0) + 1.0, 2)
+            hist.append(0)
+        w_data["hit_history"] = hist
 
 def get_hybrid_6_touches(df_rank):
     if df_rank.empty: return ["?"]*2, ["?"]*4
@@ -66,7 +71,7 @@ def get_hybrid_6_touches(df_rank):
         if len(bot_digits) == 4: break
     return sorted(top_digits), sorted(bot_digits)
 
-# --- 2. BỘ NÃO LỌC TẦNG SUPREME (GIAO THOA + 6 CHẠM) ---
+# --- 2. BỘ NÃO LỌC TẦNG SUPREME V14.2.8 ---
 def thermal_ai_engines_v14(df_raw, history, db, mapping, cfg):
     if df_raw is None or df_raw.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), df_raw, ([], []), set()
     t2, b4 = get_hybrid_6_touches(df_raw)
@@ -89,9 +94,9 @@ def thermal_ai_engines_v14(df_raw, history, db, mapping, cfg):
     df_sorted = df_raw.sort_values(by=['Final_Score', 'Số'], ascending=[False, True])
     return df_sorted.head(39), df_sorted.head(59), df_sorted.head(79), df_sorted, (t2, b4), base_88
 
-# --- 3. GIAO DIỆN HIỂN THỊ SUPREME ---
-st.set_page_config(layout="wide", page_title="Matrix Supreme V14.2.7")
-st.title("🛡️ Matrix Supreme V14.2.7")
+# --- 3. GIAO DIỆN CHÍNH ---
+st.set_page_config(layout="wide", page_title="Matrix Supreme V14.2.8 Fix")
+st.title("🛡️ Matrix Supreme V14.2.8 (Anti-Crash)")
 
 if 'cfg' not in st.session_state: st.session_state['cfg'] = {"tier": 58, "win": 12}
 if 'db' not in st.session_state: st.session_state['db'] = {}
@@ -105,18 +110,40 @@ with st.sidebar:
     up_json = st.file_uploader("Nạp JSON", type=['json'])
     if up_json and st.button("XÁC NHẬN NẠP"):
         data = json.load(up_json)
-        st.session_state['db'], st.session_state['history'], st.session_state['last_full_str'] = data.get('matrix', data), data.get('history', []), data.get('last_full_str', "")
+        st.session_state['db'] = data.get('matrix', data)
+        st.session_state['history'] = data.get('history', [])
+        st.session_state['last_full_str'] = data.get('last_full_str', "")
         st.rerun()
 
     st.header("📸 2. QUÉT KQ")
     up_img = st.file_uploader("Ảnh KQ", type=['jpg', 'png', 'jpeg'])
-    if up_img and st.button("🚀 CHẠY OCR THÔNG MINH"):
-        res_ocr = load_ocr().readtext(np.array(Image.open(up_img)), detail=0)
-        nums = [n for n in res_ocr if n.isdigit() and 2 <= len(n) <= 6]
-        if len(nums) >= 18:
-            if len(nums[0]) < len(nums[-1]): nums = nums[::-1]
-            st.session_state['raw_input'], st.session_state['gdb_val'] = " ".join(nums), nums[0][-2:]
-            st.rerun()
+    if up_img and st.button("🚀 QUÉT & GIẢI PHÓNG RAM"):
+        try:
+            # Chuyển đổi ảnh sang RGB để OCR chuẩn hơn
+            img_pil = Image.open(up_img).convert('RGB')
+            res_ocr = load_ocr().readtext(np.array(img_pil), detail=0)
+            
+            # Lọc sạch ký tự, chỉ lấy số
+            nums = []
+            for text in res_ocr:
+                clean_text = re.sub(r'\D', '', text)
+                if 2 <= len(clean_text) <= 6:
+                    nums.append(clean_text)
+            
+            if len(nums) >= 18:
+                if len(nums[0]) < len(nums[-1]): nums = nums[::-1]
+                st.session_state['raw_input'] = " ".join(nums)
+                st.session_state['gdb_val'] = nums[0][-2:]
+                
+                # Giải phóng bộ nhớ ngay lập tức
+                del img_pil
+                gc.collect()
+                st.success("RAM sạch! Quét OK.")
+                st.rerun()
+            else:
+                st.error("Không nhận diện đủ 18 hạng giải.")
+        except Exception as e:
+            st.error(f"Lỗi ảnh: {e}")
 
     st.divider()
     if st.button("🔥 PHÂN TÍCH & LƯU", type="primary", use_container_width=True):
@@ -127,13 +154,15 @@ with st.sidebar:
             gdb_num = f"{int(re.sub(r'\D', '', gdb_val)[-2:]):02d}"
             p = st.session_state.get('prev_sets', {})
             check = lambda d: "A" if gdb_num in (d or []) else "T"
+            
             st.session_state['history'].insert(0, {
                 "STT": len(st.session_state['history']) + 1, "GĐB": gdb_val,
                 "Cối39": check(p.get('d39')), "Kết59": check(p.get('d59')), 
                 "Safe79": check(p.get('d79')), "88-Base": "A" if gdb_num in (p.get('b88') or []) else "T"
             })
             update_matrix_state(st.session_state['db'], [n[-2:] for n in raw_list], mapping)
-            st.session_state['last_full_str'] = "".join(raw_list)[:82]; st.rerun()
+            st.session_state['last_full_str'] = "".join(raw_list)[:82]
+            st.rerun()
 
     st.header("📝 3. INPUT")
     st.session_state['raw_input'] = st.text_area("Loto:", value=st.session_state.get('raw_input', ""), height=80)
@@ -142,13 +171,13 @@ with st.sidebar:
     st.session_state['cfg']['tier'] = st.slider("Tầng Sạch (%):", 40, 80, 58)
     st.session_state['cfg']['win'] = st.slider("Kỳ xét:", 5, 20, 12)
 
-# --- 4. DASHBOARD HIỂN THỊ CHÍNH ---
+# --- 4. HIỂN THỊ KẾT QUẢ ---
 if st.session_state['last_full_str'] or st.session_state['db']:
     def get_matrix_df():
         db, mapping = st.session_state['db'], get_mapping_82bit(st.session_state['last_full_str'])
         stats = {f"{i:02d}": {"total_score": 0.0, "hits": 0, "losses": []} for i in range(100)}
-        for w_id, w_d in db.items():
-            num = mapping.get(str(w_id))
+        for wire_id, w_d in db.items():
+            num = mapping.get(str(wire_id))
             if num:
                 s = stats[num]; sw, sl = int(w_d.get("streak_win", 0)), int(w_d.get("streak_loss", 0))
                 s["losses"].append(sl if sw == 0 else 0)
@@ -171,7 +200,7 @@ if st.session_state['last_full_str'] or st.session_state['db']:
     m1, m2, m3 = st.columns(3)
     m1.metric("🔝 2 CHẠM MẠNH", ",".join(t2))
     m2.metric("📉 4 CHẠM ĐÁY", ",".join(b4))
-    m3.info(f"V14.2.7 | {len(st.session_state['history'])} Kỳ")
+    m3.info(f"V14.2.8 | RAM Clear")
 
     c1, c2, c3 = st.columns(3)
     c1.success("🎯 Cối Elite 39"); c1.code(", ".join(dk["Số"].tolist()))
